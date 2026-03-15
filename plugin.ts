@@ -392,6 +392,97 @@ async function callBattleSettle(
   );
 }
 
+// ─── Debate PK Helper Functions ────────────────────────────
+
+async function callDebateTopicsSync(
+  config: ClawdexChannelConfig,
+  limit: number,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    "/openclaw/plugin/debates/topics",
+    { method: "POST", body: JSON.stringify({ limit }) },
+    log,
+  );
+}
+
+async function callDebateTopicsList(
+  config: ClawdexChannelConfig,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(config, "/openclaw/plugin/debates/topics", { method: "GET" }, log);
+}
+
+async function callDebateCreate(
+  config: ClawdexChannelConfig,
+  payload: {
+    challengeId: string;
+    topicId: string;
+    sideAPlayerSlug: string;
+    sideBPlayerSlug: string;
+    totalRounds?: number;
+  },
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    "/openclaw/plugin/debates",
+    { method: "POST", body: JSON.stringify(payload) },
+    log,
+  );
+}
+
+async function callDebateAction(
+  config: ClawdexChannelConfig,
+  debateId: string,
+  action: "start" | "end",
+  summary?: string,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    `/openclaw/plugin/debates/${debateId}`,
+    { method: "POST", body: JSON.stringify({ action, summary }) },
+    log,
+  );
+}
+
+async function callDebateArgue(
+  config: ClawdexChannelConfig,
+  debateId: string,
+  playerSlug: string,
+  argument: string,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    `/openclaw/plugin/debates/${debateId}/argue`,
+    { method: "POST", body: JSON.stringify({ playerSlug, argument }) },
+    log,
+  );
+}
+
+async function callDebateGet(
+  config: ClawdexChannelConfig,
+  debateId: string,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    `/openclaw/plugin/debates/${debateId}`,
+    { method: "GET" },
+    log,
+  );
+}
+
+async function callDebateList(
+  config: ClawdexChannelConfig,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(config, "/openclaw/plugin/debates", { method: "GET" }, log);
+}
+
 async function runFullSelfTest(
   config: ClawdexChannelConfig,
   payload: Partial<FullSelfTestParams>,
@@ -548,6 +639,24 @@ const channelPlugin = {
     docsLabel: "clawdex-channel",
     blurb: "Battle operations channel for OpenClaw, backed by the Clawdex control plane.",
     order: 90,
+  },
+  config: {
+    listAccountIds: () => [],
+    resolveAccount: (_cfg: Record<string, unknown>, accountId?: string | null) => ({
+      accountId: accountId ?? "default",
+      config: {},
+      enabled: true,
+      configured: true,
+      name: "Clawdex Control Plane",
+    }),
+    defaultAccountId: () => "default",
+    isConfigured: () => true,
+    describeAccount: (account: { accountId?: string | null }) => ({
+      accountId: account.accountId ?? "default",
+      name: "Clawdex Control Plane",
+      enabled: true,
+      configured: true,
+    }),
   },
   reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
   configSchema: {
@@ -890,6 +999,295 @@ const plugin = {
         return respond(true, { ...result, resolvedAgentId });
       } catch (error) {
         return respond(false, { error: error instanceof Error ? error.message : "Failed to sync settlement" });
+      }
+    });
+
+    // ─── Debate PK Gateway Methods ────────────────────────────
+
+    /**
+     * debate.topics.sync — 从 Polymarket 同步议题
+     * params: { limit?: number }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.topics.sync`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as { limit?: number } | undefined;
+
+      try {
+        const result = await callDebateTopicsSync(config, payload?.limit ?? 10, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to sync topics" });
+      }
+    });
+
+    /**
+     * debate.topics.list — 获取已有议题列表
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.topics.list`, async ({ respond, cfg, log }) => {
+      const config = getConfig(cfg);
+
+      try {
+        const result = await callDebateTopicsList(config, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to list topics" });
+      }
+    });
+
+    /**
+     * debate.create — 创建辩论（需要先有 Challenge 和 Topic）
+     * params: { challengeId, topicId, sideAPlayerSlug, sideBPlayerSlug, totalRounds? }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.create`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as {
+        challengeId?: string;
+        topicId?: string;
+        sideAPlayerSlug?: string;
+        sideBPlayerSlug?: string;
+        totalRounds?: number;
+      } | undefined;
+
+      if (!payload?.challengeId || !payload?.topicId || !payload?.sideAPlayerSlug || !payload?.sideBPlayerSlug) {
+        return respond(false, { error: "challengeId, topicId, sideAPlayerSlug, sideBPlayerSlug are required" });
+      }
+
+      try {
+        const resolvedAgentId = await resolveAgentIdByBindings(config, { agentId: payload.sideAPlayerSlug } as any);
+        const result = await callDebateCreate(config, payload as any, log);
+        return respond(true, { ...result, resolvedAgentId, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to create debate" });
+      }
+    });
+
+    /**
+     * debate.start — 启动辩论（议题确定后，双方就位，启动辩论）
+     * params: { debateId }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.start`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as { debateId?: string } | undefined;
+
+      if (!payload?.debateId) {
+        return respond(false, { error: "debateId is required" });
+      }
+
+      try {
+        const result = await callDebateAction(config, payload.debateId, "start", undefined, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to start debate" });
+      }
+    });
+
+    /**
+     * debate.argue — 提交辩论发言
+     * params: { debateId, playerSlug, argument }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.argue`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as { debateId?: string; playerSlug?: string; argument?: string } | undefined;
+
+      if (!payload?.debateId || !payload?.playerSlug || !payload?.argument) {
+        return respond(false, { error: "debateId, playerSlug, argument are required" });
+      }
+
+      try {
+        const result = await callDebateArgue(config, payload.debateId, payload.playerSlug, payload.argument, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to submit argument" });
+      }
+    });
+
+    /**
+     * debate.end — 结束辩论，进入评审
+     * params: { debateId, summary? }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.end`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as { debateId?: string; summary?: string } | undefined;
+
+      if (!payload?.debateId) {
+        return respond(false, { error: "debateId is required" });
+      }
+
+      try {
+        const result = await callDebateAction(config, payload.debateId, "end", payload.summary, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to end debate" });
+      }
+    });
+
+    /**
+     * debate.get — 获取辩论详情
+     * params: { debateId }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.get`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as { debateId?: string } | undefined;
+
+      if (!payload?.debateId) {
+        return respond(false, { error: "debateId is required" });
+      }
+
+      try {
+        const result = await callDebateGet(config, payload.debateId, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to get debate" });
+      }
+    });
+
+    /**
+     * debate.list — 获取所有辩论
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.list`, async ({ respond, cfg, log }) => {
+      const config = getConfig(cfg);
+
+      try {
+        const result = await callDebateList(config, log);
+        return respond(true, { ...result, channel: CHANNEL_ID });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to list debates" });
+      }
+    });
+
+    /**
+     * debate.autoplay — 完整辩论自动流程
+     * 1. 同步 Polymarket 议题
+     * 2. 选择/创建议题
+     * 3. 创建 Challenge + Debate
+     * 4. 启动辩论
+     * 5. A/B 交替发言
+     * 6. 结束并进入评审
+     *
+     * params: {
+     *   challengerSlug, defenderSlug, stake,
+     *   topicId?, topicIndex?,
+     *   arguments: { a: string[], b: string[] },
+     *   totalRounds?, summary?
+     * }
+     */
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.autoplay`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as {
+        challengerSlug?: string;
+        defenderSlug?: string;
+        stake?: number;
+        topicId?: string;
+        topicIndex?: number;
+        arguments?: { a?: string[]; b?: string[] };
+        totalRounds?: number;
+        summary?: string;
+        scheduledFor?: string;
+        mode?: BattleMode;
+      } | undefined;
+
+      if (!payload?.challengerSlug || !payload?.defenderSlug) {
+        return respond(false, { error: "challengerSlug and defenderSlug are required" });
+      }
+      if (!payload?.arguments?.a?.length || !payload?.arguments?.b?.length) {
+        return respond(false, { error: "arguments.a and arguments.b arrays are required" });
+      }
+
+      const totalRounds = payload.totalRounds ?? Math.max(payload.arguments.a.length, payload.arguments.b.length);
+
+      try {
+        // Step 1: 获取或同步议题
+        let topicId = payload.topicId;
+        if (!topicId) {
+          log?.info?.("[DebateAutoplay] Syncing Polymarket topics...");
+          const syncResult = await callDebateTopicsSync(config, 10, log);
+          const topics = syncResult.topics as Array<{ id: string }>;
+          const idx = payload.topicIndex ?? 0;
+          if (!topics || topics.length === 0) {
+            return respond(false, { error: "No topics available from Polymarket" });
+          }
+          topicId = topics[Math.min(idx, topics.length - 1)]?.id;
+          if (!topicId) {
+            return respond(false, { error: "Failed to get topic ID" });
+          }
+        }
+
+        // Step 2: 创建 Challenge
+        log?.info?.("[DebateAutoplay] Creating challenge...");
+        const battleResult = await callBattleCreate(config, {
+          challengerSlug: payload.challengerSlug,
+          defenderSlug: payload.defenderSlug,
+          stake: payload.stake ?? 30,
+          scheduledFor: payload.scheduledFor ?? "辩论赛",
+          mode: payload.mode ?? "public-arena",
+          rulesNote: `Polymarket 议题辩论 PK，共 ${totalRounds} 轮`,
+        }, log);
+
+        const challengeId = (battleResult.challenge as any)?.id;
+        if (!challengeId) {
+          return respond(false, { error: "Failed to create challenge", battleResult });
+        }
+
+        // Step 3: 接受 Challenge
+        log?.info?.("[DebateAutoplay] Accepting challenge...");
+        await callBattleAccept(config, {
+          challengeId,
+          defenderSlug: payload.defenderSlug,
+        }, log);
+
+        // Step 4: 创建 Debate
+        log?.info?.("[DebateAutoplay] Creating debate...");
+        const debateResult = await callDebateCreate(config, {
+          challengeId,
+          topicId,
+          sideAPlayerSlug: payload.challengerSlug,
+          sideBPlayerSlug: payload.defenderSlug,
+          totalRounds,
+        }, log);
+
+        const debateId = (debateResult.debate as any)?.id;
+        if (!debateId) {
+          return respond(false, { error: "Failed to create debate", debateResult });
+        }
+
+        // Step 5: 启动辩论
+        log?.info?.("[DebateAutoplay] Starting debate...");
+        await callDebateAction(config, debateId, "start", undefined, log);
+
+        // Step 6: 交替发言
+        const roundResults = [];
+        for (let round = 0; round < totalRounds; round++) {
+          // A 先
+          if (payload.arguments.a[round]) {
+            log?.info?.(`[DebateAutoplay] Round ${round + 1}: Side A arguing...`);
+            const aResult = await callDebateArgue(config, debateId, payload.challengerSlug, payload.arguments.a[round], log);
+            roundResults.push({ round: round + 1, side: "A", ok: true });
+          }
+          // B 后
+          if (payload.arguments.b[round]) {
+            log?.info?.(`[DebateAutoplay] Round ${round + 1}: Side B arguing...`);
+            const bResult = await callDebateArgue(config, debateId, payload.defenderSlug, payload.arguments.b[round], log);
+            roundResults.push({ round: round + 1, side: "B", ok: true });
+          }
+        }
+
+        // Step 7: 结束辩论
+        log?.info?.("[DebateAutoplay] Ending debate...");
+        const endResult = await callDebateAction(config, debateId, "end", payload.summary, log);
+
+        return respond(true, {
+          ok: true,
+          channel: CHANNEL_ID,
+          challengeId,
+          debateId,
+          topicId,
+          totalRounds,
+          roundResults,
+          debate: endResult.debate,
+          message: `辩论自动流程完成！共 ${totalRounds} 轮，已进入评审阶段。`,
+        });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Debate autoplay failed" });
       }
     });
 

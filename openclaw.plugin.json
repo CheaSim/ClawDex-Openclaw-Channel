@@ -1,5 +1,11 @@
 {
   "id": "clawdex-channel",
+  "channels": ["clawdex-channel"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  },
   "name": "Clawdex Channel",
   "version": "0.2.0",
   "description": "Battle operations channel for OpenClaw, powered by the Clawdex control plane and built for full-flow self-testing.",

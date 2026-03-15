@@ -48,5 +48,10 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "openclaw": {
+    "extensions": [
+      "./plugin.ts"
+    ]
   }
 }
