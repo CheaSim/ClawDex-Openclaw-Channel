@@ -1,0 +1,934 @@
+type JsonSchema = Record<string, unknown>;
+
+type GatewayResponder = (ok: boolean, payload?: Record<string, unknown>) => void;
+
+type GatewayMethodContext = {
+  cfg: Record<string, any>;
+  params?: Record<string, any>;
+  respond: GatewayResponder;
+  log?: {
+    info?: (...args: unknown[]) => void;
+    warn?: (...args: unknown[]) => void;
+    error?: (...args: unknown[]) => void;
+  };
+};
+
+type PluginApi = {
+  registerChannel?: (input: { plugin: Record<string, unknown> }) => void;
+  registerGatewayMethod?: (name: string, handler: (context: GatewayMethodContext) => Promise<void> | void) => void;
+  logger?: {
+    info?: (...args: unknown[]) => void;
+  };
+};
+
+type ClawdexChannelConfig = {
+  enabled?: boolean;
+  gatewayBaseUrl?: string;
+  gatewayToken?: string;
+  controlPlaneBaseUrl?: string;
+  controlPlaneToken?: string;
+  defaultMode?: "public-arena" | "rivalry" | "ranked-1v1";
+  readinessStrategy?: "control-plane" | "gateway";
+  defaultAgentId?: string;
+};
+
+type BattleMode = "public-arena" | "rivalry" | "ranked-1v1";
+
+type BattleCreateParams = {
+  challengerSlug: string;
+  defenderSlug: string;
+  mode?: BattleMode;
+  stake: number;
+  scheduledFor: string;
+  visibility?: "public" | "followers";
+  rulesNote?: string;
+  peerKind?: "direct" | "group";
+  peerId?: string;
+  scope?: string;
+  agentId?: string;
+};
+
+type BattleAcceptParams = {
+  challengeId: string;
+  defenderSlug?: string;
+  sourceSessionId?: string;
+  peerKind?: "direct" | "group";
+  peerId?: string;
+  scope?: string;
+  agentId?: string;
+};
+
+type BattleSettleParams = {
+  challengeId: string;
+  winnerSlug: string;
+  settlementSummary?: string;
+  sourceSessionId?: string;
+  mode?: BattleMode;
+  peerKind?: "direct" | "group";
+  peerId?: string;
+  scope?: string;
+  agentId?: string;
+};
+
+type AccountProvisionParams = {
+  email?: string;
+  name?: string;
+  password?: string;
+  preferredPlayerSlug?: string;
+  playerName?: string;
+  channel?: string;
+  accountId?: string;
+  region?: "CN" | "SEA" | "EU" | "NA";
+  clientVersion?: string;
+  notes?: string;
+  openClawStatus?: "disconnected" | "configured" | "ready";
+  autoReady?: boolean;
+};
+
+type CreditBalanceParams = {
+  playerSlug?: string;
+  email?: string;
+};
+
+type BattleAutoplayParams = BattleCreateParams & {
+  challengerEmail?: string;
+  challengerName?: string;
+  challengerAccountId?: string;
+  challengerChannel?: string;
+  challengerRegion?: "CN" | "SEA" | "EU" | "NA";
+  challengerClientVersion?: string;
+  autoProvisionChallenger?: boolean;
+  autoReady?: boolean;
+};
+
+type FullSelfTestParams = {
+  challengerSlug?: string;
+  challengerEmail?: string;
+  challengerName?: string;
+  defenderSlug?: string;
+  defenderEmail?: string;
+  defenderName?: string;
+  mode?: BattleMode;
+  stake?: number;
+  visibility?: "public" | "followers";
+  scheduledFor?: string;
+  rulesNote?: string;
+  autoReady?: boolean;
+  settleWinner?: "challenger" | "defender";
+  keepChallengeOpen?: boolean;
+};
+
+type BindingPeer = {
+  kind?: "direct" | "group";
+  id?: string;
+};
+
+type BindingMatch = {
+  channel?: string;
+  mode?: BattleMode | "*";
+  scope?: string | "*";
+  peer?: BindingPeer;
+};
+
+type Binding = {
+  agentId: string;
+  match?: BindingMatch;
+};
+
+type AgentResolutionParams = {
+  mode?: BattleMode;
+  scope?: string;
+  peerKind?: "direct" | "group";
+  peerId?: string;
+  agentId?: string;
+};
+
+const CHANNEL_ID = "clawdex-channel";
+const DEFAULT_STAKE = 20;
+const DEFAULT_SCHEDULE = "即刻开战";
+const DEFAULT_RULES_NOTE = "由 OpenClaw 插件自动发起的联调 PK。";
+
+function getConfig(cfg: Record<string, any>): ClawdexChannelConfig {
+  return ((cfg?.channels as Record<string, unknown> | undefined)?.[CHANNEL_ID] as ClawdexChannelConfig | undefined) ?? {};
+}
+
+function isConfigured(cfg: Record<string, any>) {
+  const config = getConfig(cfg);
+  return Boolean(config.controlPlaneBaseUrl);
+}
+
+function getBindings(cfg: Record<string, any>) {
+  return (Array.isArray(cfg?.bindings) ? cfg.bindings : []) as Binding[];
+}
+
+function matchesField(expected: string | undefined, actual: string | undefined) {
+  if (!expected || expected === "*") {
+    return true;
+  }
+
+  return expected === actual;
+}
+
+function resolveAgentIdByBindings(cfg: Record<string, any>, params: AgentResolutionParams) {
+  if (params.agentId) {
+    return params.agentId;
+  }
+
+  const config = getConfig(cfg);
+  const bindings = getBindings(cfg);
+
+  for (const binding of bindings) {
+    const match = binding.match;
+
+    if (!binding.agentId) {
+      continue;
+    }
+
+    if (!matchesField(match?.channel, CHANNEL_ID)) {
+      continue;
+    }
+
+    if (!matchesField(match?.mode, params.mode)) {
+      continue;
+    }
+
+    if (!matchesField(match?.scope, params.scope)) {
+      continue;
+    }
+
+    if (!matchesField(match?.peer?.kind, params.peerKind)) {
+      continue;
+    }
+
+    if (!matchesField(match?.peer?.id, params.peerId)) {
+      continue;
+    }
+
+    return binding.agentId;
+  }
+
+  if (config.defaultAgentId) {
+    return config.defaultAgentId;
+  }
+
+  return config.defaultMode === "ranked-1v1" ? "clawdex-ranked" : "clawdex-main";
+}
+
+function normalizeText(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function requireConfig(config: ClawdexChannelConfig) {
+  if (!config.controlPlaneBaseUrl) {
+    throw new Error("channels.clawdex-channel.controlPlaneBaseUrl is required");
+  }
+
+  return config;
+}
+
+function buildControlPlaneUrl(config: ClawdexChannelConfig, path: string) {
+  const baseUrl = (config.controlPlaneBaseUrl ?? "").replace(/\/$/, "");
+  return `${baseUrl}${path}`;
+}
+
+function buildHeaders(config: ClawdexChannelConfig) {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+  });
+
+  if (config.controlPlaneToken) {
+    headers.set("Authorization", `Bearer ${config.controlPlaneToken}`);
+  }
+
+  return headers;
+}
+
+async function readJsonSafely(response: Response) {
+  try {
+    return (await response.json()) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+async function callControlPlane(
+  config: ClawdexChannelConfig,
+  path: string,
+  init: RequestInit,
+  log?: GatewayMethodContext["log"],
+) {
+  const safeConfig = requireConfig(config);
+  const url = buildControlPlaneUrl(safeConfig, path);
+  log?.info?.(`[ClawdexPlugin] ${init.method ?? "GET"} ${url}`);
+
+  const response = await fetch(url, {
+    ...init,
+    headers: buildHeaders(safeConfig),
+  });
+
+  const payload = await readJsonSafely(response);
+
+  if (!response.ok) {
+    const message = typeof payload.message === "string" ? payload.message : `Control plane request failed with ${response.status}`;
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+async function callDiscovery(config: ClawdexChannelConfig, log?: GatewayMethodContext["log"]) {
+  return callControlPlane(config, "/openclaw/plugin/discovery", { method: "GET" }, log);
+}
+
+async function callStatus(config: ClawdexChannelConfig, log?: GatewayMethodContext["log"]) {
+  return callControlPlane(config, "/openclaw/plugin/status", { method: "GET" }, log);
+}
+
+async function callProvision(
+  config: ClawdexChannelConfig,
+  payload: Partial<AccountProvisionParams>,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    "/openclaw/plugin/accounts/provision",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    log,
+  );
+}
+
+async function callReadiness(config: ClawdexChannelConfig, playerSlug: string, log?: GatewayMethodContext["log"]) {
+  const query = new URLSearchParams({ playerSlug }).toString();
+  return callControlPlane(config, `/openclaw/plugin/readiness?${query}`, { method: "GET" }, log);
+}
+
+async function callCredit(
+  config: ClawdexChannelConfig,
+  input: Partial<CreditBalanceParams>,
+  log?: GatewayMethodContext["log"],
+) {
+  const query = new URLSearchParams();
+
+  if (input.playerSlug) {
+    query.set("playerSlug", input.playerSlug);
+  }
+
+  if (input.email) {
+    query.set("email", input.email);
+  }
+
+  return callControlPlane(config, `/openclaw/plugin/credits?${query.toString()}`, { method: "GET" }, log);
+}
+
+async function callBattleCreate(
+  config: ClawdexChannelConfig,
+  payload: Partial<BattleCreateParams>,
+  log?: GatewayMethodContext["log"],
+) {
+  return callControlPlane(
+    config,
+    "/openclaw/plugin/challenges",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        challengerSlug: payload.challengerSlug,
+        defenderSlug: payload.defenderSlug,
+        mode: payload.mode ?? config.defaultMode ?? "public-arena",
+        stake: payload.stake,
+        scheduledFor: payload.scheduledFor ?? DEFAULT_SCHEDULE,
+        visibility: payload.visibility ?? "public",
+        rulesNote: payload.rulesNote ?? DEFAULT_RULES_NOTE,
+      }),
+    },
+    log,
+  );
+}
+
+async function callBattleAccept(
+  config: ClawdexChannelConfig,
+  payload: Partial<BattleAcceptParams>,
+  log?: GatewayMethodContext["log"],
+) {
+  const challengeId = normalizeText(payload.challengeId);
+
+  return callControlPlane(
+    config,
+    `/openclaw/plugin/challenges/${challengeId}/accept`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        defenderSlug: payload.defenderSlug,
+        sourceChannel: CHANNEL_ID,
+        sourceSessionId: payload.sourceSessionId,
+      }),
+    },
+    log,
+  );
+}
+
+async function callBattleSettle(
+  config: ClawdexChannelConfig,
+  payload: Partial<BattleSettleParams>,
+  log?: GatewayMethodContext["log"],
+) {
+  const challengeId = normalizeText(payload.challengeId);
+
+  return callControlPlane(
+    config,
+    `/openclaw/plugin/challenges/${challengeId}/settle`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        winnerSlug: payload.winnerSlug,
+        settlementSummary: payload.settlementSummary,
+        sourceChannel: CHANNEL_ID,
+        sourceSessionId: payload.sourceSessionId,
+      }),
+    },
+    log,
+  );
+}
+
+async function runFullSelfTest(
+  config: ClawdexChannelConfig,
+  payload: Partial<FullSelfTestParams>,
+  log?: GatewayMethodContext["log"],
+) {
+  const now = Date.now();
+  const autoReady = payload.autoReady ?? true;
+  const challengerName = normalizeText(payload.challengerName) || `SelfTest Challenger ${String(now).slice(-4)}`;
+  const defenderName = normalizeText(payload.defenderName) || `SelfTest Defender ${String(now).slice(-4)}`;
+  const challengerEmail = normalizeText(payload.challengerEmail) || `challenger-${now}@agents.clawdex.local`;
+  const defenderEmail = normalizeText(payload.defenderEmail) || `defender-${now}@agents.clawdex.local`;
+
+  const discovery = await callDiscovery(config, log);
+
+  const challengerProvision = await callProvision(
+    config,
+    {
+      email: challengerEmail,
+      name: challengerName,
+      preferredPlayerSlug: payload.challengerSlug,
+      playerName: challengerName,
+      channel: "Clawdex SelfTest Channel",
+      accountId: `stc-${String(now).slice(-6)}`,
+      clientVersion: "selftest",
+      notes: "Created by clawdex-channel.selftest.full",
+      autoReady,
+      openClawStatus: autoReady ? "ready" : "configured",
+    },
+    log,
+  );
+
+  const resolvedChallengerSlug = normalizeText((challengerProvision.player as Record<string, unknown> | undefined)?.slug);
+
+  const defenderProvision = await callProvision(
+    config,
+    {
+      email: defenderEmail,
+      name: defenderName,
+      preferredPlayerSlug: payload.defenderSlug,
+      playerName: defenderName,
+      channel: "Clawdex SelfTest Channel",
+      accountId: `std-${String(now).slice(-6)}`,
+      clientVersion: "selftest",
+      notes: "Created by clawdex-channel.selftest.full",
+      autoReady,
+      openClawStatus: autoReady ? "ready" : "configured",
+    },
+    log,
+  );
+
+  const resolvedDefenderSlug = normalizeText((defenderProvision.player as Record<string, unknown> | undefined)?.slug);
+
+  if (!resolvedChallengerSlug || !resolvedDefenderSlug) {
+    throw new Error("Self-test could not resolve both challengerSlug and defenderSlug");
+  }
+
+  const [challengerReadiness, defenderReadiness] = await Promise.all([
+    callReadiness(config, resolvedChallengerSlug, log),
+    callReadiness(config, resolvedDefenderSlug, log),
+  ]);
+
+  if (!challengerReadiness.ready || !defenderReadiness.ready) {
+    throw new Error("Provisioned players are not ready. Check CLAWDEX_DATA_BACKEND=prisma and autoReady flow.");
+  }
+
+  const createdBattle = await callBattleCreate(
+    config,
+    {
+      challengerSlug: resolvedChallengerSlug,
+      defenderSlug: resolvedDefenderSlug,
+      mode: payload.mode ?? config.defaultMode ?? "public-arena",
+      stake: payload.stake ?? DEFAULT_STAKE,
+      scheduledFor: payload.scheduledFor ?? DEFAULT_SCHEDULE,
+      visibility: payload.visibility ?? "public",
+      rulesNote: payload.rulesNote ?? DEFAULT_RULES_NOTE,
+    },
+    log,
+  );
+
+  const challenge = createdBattle.challenge as Record<string, unknown> | undefined;
+  const challengeId = normalizeText(challenge?.id);
+
+  if (!challengeId) {
+    throw new Error("Self-test created battle but did not receive challengeId");
+  }
+
+  const acceptedBattle = await callBattleAccept(
+    config,
+    {
+      challengeId,
+      defenderSlug: resolvedDefenderSlug,
+      sourceSessionId: `selftest-accept-${now}`,
+    },
+    log,
+  );
+
+  let settlement: Record<string, unknown> | null = null;
+
+  if (!payload.keepChallengeOpen) {
+    const settleWinner =
+      payload.settleWinner === "defender"
+        ? resolvedDefenderSlug
+        : resolvedChallengerSlug;
+
+    settlement = await callBattleSettle(
+      config,
+      {
+        challengeId,
+        winnerSlug: settleWinner,
+        settlementSummary: `Self-test completed. Winner: ${settleWinner}`,
+        sourceSessionId: `selftest-settle-${now}`,
+      },
+      log,
+    );
+  }
+
+  const [challengerCredit, defenderCredit] = await Promise.all([
+    callCredit(config, { playerSlug: resolvedChallengerSlug }, log),
+    callCredit(config, { playerSlug: resolvedDefenderSlug }, log),
+  ]);
+
+  return {
+    ok: true,
+    channel: CHANNEL_ID,
+    recommendedNextStep: payload.keepChallengeOpen ? "Run battle.settle after manual verification." : "Self-test complete. You can now create real battles.",
+    flow: {
+      discovery,
+      challengerProvision,
+      defenderProvision,
+      challengerReadiness,
+      defenderReadiness,
+      createdBattle,
+      acceptedBattle,
+      settlement,
+      challengerCredit,
+      defenderCredit,
+    },
+    summary: {
+      challengerSlug: resolvedChallengerSlug,
+      defenderSlug: resolvedDefenderSlug,
+      challengeId,
+      settled: !payload.keepChallengeOpen,
+    },
+  };
+}
+
+const channelPlugin = {
+  id: CHANNEL_ID,
+  meta: {
+    id: CHANNEL_ID,
+    label: "Clawdex",
+    selectionLabel: "Clawdex Battle Channel",
+    docsPath: "/channels/clawdex-channel",
+    docsLabel: "clawdex-channel",
+    blurb: "Battle operations channel for OpenClaw, backed by the Clawdex control plane.",
+    order: 90,
+  },
+  reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
+  configSchema: {
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true },
+        gatewayBaseUrl: { type: "string", description: "Optional custom OpenClaw Gateway base URL" },
+        gatewayToken: { type: "string", description: "Optional Gateway token" },
+        controlPlaneBaseUrl: { type: "string", description: "Required Clawdex control plane API base URL, for example http://127.0.0.1:3000/api" },
+        controlPlaneToken: { type: "string", description: "Optional bearer token for Clawdex control plane" },
+        defaultMode: { type: "string", enum: ["public-arena", "rivalry", "ranked-1v1"], default: "public-arena" },
+        readinessStrategy: { type: "string", enum: ["control-plane", "gateway"], default: "control-plane" },
+        defaultAgentId: { type: "string", description: "Fallback OpenClaw agent ID when no binding matches" },
+      },
+      required: ["controlPlaneBaseUrl"],
+    } satisfies JsonSchema,
+    uiHints: {
+      enabled: { label: "Enable Clawdex Channel" },
+      gatewayBaseUrl: { label: "Gateway Base URL" },
+      controlPlaneBaseUrl: { label: "Clawdex API Base URL" },
+      controlPlaneToken: { label: "Clawdex API Token", sensitive: true },
+      defaultAgentId: { label: "Default Agent ID" },
+    },
+  },
+  status: {
+    probe: async ({ cfg }: { cfg: Record<string, any> }) => {
+      if (!isConfigured(cfg)) {
+        return { ok: false, error: "Clawdex controlPlaneBaseUrl is not configured" };
+      }
+
+      const config = getConfig(cfg);
+
+      try {
+        const payload = await callStatus(config);
+        return {
+          ok: true,
+          details: {
+            configured: true,
+            controlPlaneBaseUrl: config.controlPlaneBaseUrl,
+            readinessStrategy: config.readinessStrategy ?? "control-plane",
+            remote: payload,
+          },
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : "Failed to reach Clawdex control plane",
+        };
+      }
+    },
+    buildChannelSummary: ({ snapshot }: { snapshot?: Record<string, unknown> }) => ({
+      configured: snapshot?.configured ?? false,
+      running: snapshot?.running ?? false,
+      lastStartAt: snapshot?.lastStartAt ?? null,
+      lastStopAt: snapshot?.lastStopAt ?? null,
+      lastError: snapshot?.lastError ?? null,
+    }),
+  },
+};
+
+const plugin = {
+  id: CHANNEL_ID,
+  name: "Clawdex Channel",
+  description: "OpenClaw battle channel backed by the Clawdex control plane",
+  configSchema: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      enabled: { type: "boolean", default: true },
+    },
+  },
+  register(api: PluginApi) {
+    api.registerChannel?.({ plugin: channelPlugin });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.status`, async ({ respond, cfg }) => {
+      const result = await channelPlugin.status.probe({ cfg });
+      respond(result.ok, result);
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.docs`, async ({ respond, cfg }) => {
+      const config = getConfig(cfg);
+      respond(true, {
+        ok: true,
+        channel: CHANNEL_ID,
+        configured: Boolean(config.controlPlaneBaseUrl),
+        install: [
+          "openclaw plugins install @cheasim/clawdex-channel",
+          "configure channels.clawdex-channel.controlPlaneBaseUrl",
+          "optionally set channels.clawdex-channel.controlPlaneToken",
+          "invoke clawdex-channel.status",
+          "invoke clawdex-channel.selftest.full",
+        ],
+        methods: [
+          `${CHANNEL_ID}.status`,
+          `${CHANNEL_ID}.docs`,
+          `${CHANNEL_ID}.discovery`,
+          `${CHANNEL_ID}.account.provision`,
+          `${CHANNEL_ID}.battle.readiness`,
+          `${CHANNEL_ID}.battle.create`,
+          `${CHANNEL_ID}.battle.accept`,
+          `${CHANNEL_ID}.battle.settle`,
+          `${CHANNEL_ID}.credit.balance`,
+          `${CHANNEL_ID}.selftest.quick`,
+          `${CHANNEL_ID}.selftest.full`,
+        ],
+        examples: {
+          selftestFull: {
+            mode: "public-arena",
+            stake: 20,
+            autoReady: true,
+            settleWinner: "challenger",
+          },
+        },
+      });
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.agent.resolve`, async ({ respond, cfg, params }) => {
+      const payload = params as AgentResolutionParams | undefined;
+      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+
+      respond(true, {
+        ok: true,
+        channel: CHANNEL_ID,
+        resolvedAgentId,
+        criteria: payload ?? {},
+      });
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.discovery`, async ({ respond, cfg, log }) => {
+      const config = getConfig(cfg);
+
+      try {
+        const result = await callDiscovery(config, log);
+        return respond(true, result);
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to discover Clawdex" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.account.provision`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<AccountProvisionParams> | undefined;
+
+      try {
+        const result = await callProvision(
+          config,
+          {
+            email: payload?.email,
+            name: payload?.name,
+            password: payload?.password,
+            preferredPlayerSlug: payload?.preferredPlayerSlug,
+            playerName: payload?.playerName,
+            channel: payload?.channel,
+            accountId: payload?.accountId,
+            region: payload?.region,
+            clientVersion: payload?.clientVersion,
+            notes: payload?.notes,
+            openClawStatus: payload?.openClawStatus,
+            autoReady: payload?.autoReady,
+          },
+          log,
+        );
+        return respond(true, result);
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to provision account" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.credit.balance`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<CreditBalanceParams> | undefined;
+
+      if (!payload?.playerSlug && !payload?.email) {
+        return respond(false, { error: "playerSlug or email is required" });
+      }
+
+      try {
+        const result = await callCredit(config, payload, log);
+        return respond(true, result);
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to resolve credit balance" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.readiness`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const playerSlug = normalizeText(params?.playerSlug);
+
+      if (!playerSlug) {
+        return respond(false, { error: "playerSlug is required" });
+      }
+
+      try {
+        const result = await callReadiness(config, playerSlug, log);
+        return respond(true, result);
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to resolve readiness" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.create`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<BattleCreateParams> | undefined;
+      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+
+      if (!payload?.challengerSlug || !payload?.defenderSlug) {
+        return respond(false, { error: "challengerSlug and defenderSlug are required" });
+      }
+
+      if (!payload.stake || payload.stake <= 0) {
+        return respond(false, { error: "stake must be greater than 0" });
+      }
+
+      try {
+        const result = await callBattleCreate(config, payload, log);
+        return respond(true, { ...result, resolvedAgentId });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to create battle" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.autoplay`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<BattleAutoplayParams> | undefined;
+      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+
+      let challengerSlug = normalizeText(payload?.challengerSlug);
+      let provisionResult: Record<string, unknown> | null = null;
+
+      try {
+        if (!challengerSlug && payload?.autoProvisionChallenger) {
+          provisionResult = await callProvision(
+            config,
+            {
+              email: payload.challengerEmail,
+              name: payload.challengerName,
+              preferredPlayerSlug: payload.challengerSlug,
+              playerName: payload.challengerName,
+              channel: payload.challengerChannel,
+              accountId: payload.challengerAccountId,
+              region: payload.challengerRegion,
+              clientVersion: payload.challengerClientVersion,
+              autoReady: payload.autoReady,
+            },
+            log,
+          );
+
+          const provisionedPlayer = provisionResult.player as Record<string, unknown> | undefined;
+          challengerSlug = normalizeText(provisionedPlayer?.slug);
+        }
+
+        if (!challengerSlug || !payload?.defenderSlug) {
+          return respond(false, {
+            error: "challengerSlug and defenderSlug are required. You can set autoProvisionChallenger=true to create the challenger automatically.",
+          });
+        }
+
+        if (!payload.stake || payload.stake <= 0) {
+          return respond(false, { error: "stake must be greater than 0" });
+        }
+
+        const [challengerReadiness, defenderReadiness] = await Promise.all([
+          callReadiness(config, challengerSlug, log),
+          callReadiness(config, payload.defenderSlug, log),
+        ]);
+
+        if (!challengerReadiness.ready || !defenderReadiness.ready) {
+          return respond(false, {
+            error: "Players are not ready for auto PK yet",
+            challengerSlug,
+            challengerReadiness,
+            defenderReadiness,
+            provisionResult,
+          });
+        }
+
+        const result = await callBattleCreate(
+          config,
+          {
+            challengerSlug,
+            defenderSlug: payload.defenderSlug,
+            mode: payload.mode,
+            stake: payload.stake,
+            scheduledFor: payload.scheduledFor ?? DEFAULT_SCHEDULE,
+            visibility: payload.visibility ?? "public",
+            rulesNote: payload.rulesNote ?? "由 OpenClaw 自动发起 PK。",
+          },
+          log,
+        );
+
+        return respond(true, {
+          ...result,
+          resolvedAgentId,
+          challengerSlug,
+          challengerReadiness,
+          defenderReadiness,
+          provisionResult,
+        });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to autoplay battle" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.accept`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<BattleAcceptParams> | undefined;
+      const challengeId = normalizeText(payload?.challengeId);
+      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+
+      if (!challengeId) {
+        return respond(false, { error: "challengeId is required" });
+      }
+
+      try {
+        const result = await callBattleAccept(config, payload ?? {}, log);
+        return respond(true, { ...result, resolvedAgentId });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to accept battle" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.settle`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<BattleSettleParams> | undefined;
+      const challengeId = normalizeText(payload?.challengeId);
+      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+
+      if (!challengeId) {
+        return respond(false, { error: "challengeId is required" });
+      }
+
+      if (!payload?.winnerSlug) {
+        return respond(false, { error: "winnerSlug is required" });
+      }
+
+      try {
+        const result = await callBattleSettle(config, payload ?? {}, log);
+        return respond(true, { ...result, resolvedAgentId });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Failed to sync settlement" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.selftest.quick`, async ({ respond, cfg, log }) => {
+      const config = getConfig(cfg);
+
+      try {
+        const [status, discovery] = await Promise.all([
+          callStatus(config, log),
+          callDiscovery(config, log),
+        ]);
+
+        return respond(true, {
+          ok: true,
+          channel: CHANNEL_ID,
+          status,
+          discovery,
+          message: "Quick self-test passed. Control plane is reachable and discovery is working.",
+        });
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Quick self-test failed" });
+      }
+    });
+
+    api.registerGatewayMethod?.(`${CHANNEL_ID}.selftest.full`, async ({ respond, cfg, params, log }) => {
+      const config = getConfig(cfg);
+      const payload = params as Partial<FullSelfTestParams> | undefined;
+
+      try {
+        const result = await runFullSelfTest(config, payload ?? {}, log);
+        return respond(true, result);
+      } catch (error) {
+        return respond(false, { error: error instanceof Error ? error.message : "Full self-test failed" });
+      }
+    });
+
+    api.logger?.info?.("[Clawdex] Clawdex channel plugin registered with live control-plane adapter methods");
+  },
+};
+
+export default plugin;
+export { channelPlugin, getConfig, isConfigured, resolveAgentIdByBindings };

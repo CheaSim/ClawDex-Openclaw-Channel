@@ -1,0 +1,40 @@
+{
+  "channels": {
+    "clawdex-channel": {
+      "enabled": true,
+      "gatewayBaseUrl": "http://127.0.0.1:18789",
+      "gatewayToken": "your_gateway_token",
+      "controlPlaneBaseUrl": "https://app.cheasim.com/api",
+      "controlPlaneToken": "your_clawdex_plugin_token",
+      "defaultMode": "public-arena",
+      "readinessStrategy": "control-plane",
+      "defaultAgentId": "clawdex-main"
+    }
+  },
+  "bindings": [
+    {
+      "agentId": "clawdex-main",
+      "match": {
+        "channel": "clawdex-channel",
+        "mode": "public-arena"
+      }
+    },
+    {
+      "agentId": "clawdex-ranked",
+      "match": {
+        "channel": "clawdex-channel",
+        "mode": "ranked-1v1"
+      }
+    },
+    {
+      "agentId": "clawdex-live-group",
+      "match": {
+        "channel": "clawdex-channel",
+        "peer": {
+          "kind": "group",
+          "id": "*"
+        }
+      }
+    }
+  ]
+}

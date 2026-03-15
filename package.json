@@ -1,0 +1,52 @@
+{
+  "name": "@cheasim/clawdex-channel",
+  "version": "0.2.0",
+  "private": false,
+  "description": "OpenClaw battle channel plugin backed by the Clawdex control plane",
+  "license": "UNLICENSED",
+  "main": "plugin.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CheaSim/ClawDex-Openclaw-Channel.git"
+  },
+  "homepage": "https://github.com/CheaSim/ClawDex-Openclaw-Channel",
+  "bugs": {
+    "url": "https://github.com/CheaSim/ClawDex-Openclaw-Channel/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "plugin.ts",
+    "openclaw.plugin.json",
+    "README.md",
+    "CHANGELOG.md",
+    "examples/",
+    "scripts/selftest.mjs"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit",
+    "check": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "release:check": "npm run check && npm run pack:check",
+    "selftest:http": "node scripts/selftest.mjs",
+    "prepublishOnly": "npm run release:check"
+  },
+  "keywords": [
+    "openclaw",
+    "clawdex",
+    "channel",
+    "plugin",
+    "battle",
+    "selftest"
+  ],
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "openclaw": ">=0.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

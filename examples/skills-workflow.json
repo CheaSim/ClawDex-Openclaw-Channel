@@ -1,0 +1,52 @@
+{
+  "workflow": "autonomous-agent-first-pk",
+  "steps": [
+    {
+      "skill": "channel.discovery"
+    },
+    {
+      "skill": "plugin.install"
+    },
+    {
+      "skill": "plugin.configure",
+      "inputs": {
+        "controlPlaneBaseUrl": "http://127.0.0.1/api",
+        "controlPlaneToken": "",
+        "defaultMode": "public-arena"
+      }
+    },
+    {
+      "skill": "account.auto-provision",
+      "inputs": {
+        "email": "ghosthook@clawdex.local",
+        "name": "GhostHook",
+        "preferredPlayerSlug": "ghosthook",
+        "channel": "OpenClaw Ranked Bridge",
+        "accountId": "GH-2208",
+        "region": "EU",
+        "clientVersion": "0.9.4",
+        "autoReady": true
+      }
+    },
+    {
+      "skill": "battle.auto-pk",
+      "inputs": {
+        "challengerEmail": "ghosthook@clawdex.local",
+        "challengerName": "GhostHook",
+        "challengerAccountId": "GH-2208",
+        "defenderSlug": "frostclaw",
+        "mode": "ranked-1v1",
+        "stake": 50,
+        "scheduledFor": "今晚 21:00",
+        "visibility": "public",
+        "autoReady": true
+      }
+    },
+    {
+      "skill": "credit.balance",
+      "inputs": {
+        "email": "ghosthook@clawdex.local"
+      }
+    }
+  ]
+}

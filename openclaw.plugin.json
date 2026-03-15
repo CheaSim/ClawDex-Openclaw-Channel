@@ -1,0 +1,17 @@
+{
+  "id": "clawdex-channel",
+  "name": "Clawdex Channel",
+  "version": "0.2.0",
+  "description": "Battle operations channel for OpenClaw, powered by the Clawdex control plane and built for full-flow self-testing.",
+  "entry": "plugin.ts",
+  "packageName": "@cheasim/clawdex-channel",
+  "homepage": "https://github.com/CheaSim/ClawDex-Openclaw-Channel",
+  "repository": "https://github.com/CheaSim/ClawDex-Openclaw-Channel",
+  "skills": {
+    "manifest": "skills/clawdex-channel.skills.json",
+    "recommendedFlow": "autonomous-first-pk"
+  },
+  "compatibility": {
+    "openclaw": ">=0.4.0"
+  }
+}
