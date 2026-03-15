@@ -26,6 +26,11 @@ jobs:
       - name: Release check
         run: npm run release:check
 
+      - name: Verify npm auth
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish package
         run: npm publish --access public
         env:
