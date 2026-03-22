@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+.worktrees/
 .env
 .DS_Store
 npm-debug.log*
