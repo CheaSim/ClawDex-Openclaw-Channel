@@ -14,6 +14,8 @@ type GatewayMethodContext = {
 };
 
 type PluginApi = {
+  config?: Record<string, unknown>;
+  pluginConfig?: Record<string, unknown>;
   registerChannel?: (input: { plugin: Record<string, unknown> }) => void;
   registerGatewayMethod?: (name: string, handler: (context: GatewayMethodContext) => Promise<void> | void) => void;
   logger?: {
@@ -149,7 +151,68 @@ const DEFAULT_SCHEDULE = "即刻开战";
 const DEFAULT_RULES_NOTE = "由 OpenClaw 插件自动发起的联调 PK。";
 
 function getConfig(cfg: Record<string, any>): ClawdexChannelConfig {
-  return ((cfg?.channels as Record<string, unknown> | undefined)?.[CHANNEL_ID] as ClawdexChannelConfig | undefined) ?? {};
+  const rootConfig = (cfg?.channels as Record<string, unknown> | undefined)?.[CHANNEL_ID] as ClawdexChannelConfig | undefined;
+
+  if (rootConfig) {
+    return rootConfig;
+  }
+
+  // Gateway methods can provide the channel's config object directly instead of the full root config.
+  if (cfg && typeof cfg === "object" && ("controlPlaneBaseUrl" in cfg || "gatewayBaseUrl" in cfg || "defaultMode" in cfg)) {
+    return cfg as ClawdexChannelConfig;
+  }
+
+  return {};
+}
+
+function resolveRuntimeRootConfig(
+  cfg: Record<string, any> | undefined,
+  runtimeConfig?: Record<string, unknown>,
+): Record<string, any> {
+  if (cfg && typeof cfg === "object") {
+    return cfg;
+  }
+
+  if (runtimeConfig && typeof runtimeConfig === "object") {
+    return runtimeConfig as Record<string, any>;
+  }
+
+  return {};
+}
+
+async function loadOpenClawRootConfig(): Promise<Record<string, any>> {
+  try {
+    const runtimeLoader = new Function("return import('openclaw/plugin-sdk/config-runtime')") as () => Promise<Record<string, any>>;
+    const runtime = await runtimeLoader();
+    const snapshot =
+      typeof runtime.getRuntimeConfigSnapshot === "function" ? runtime.getRuntimeConfigSnapshot() : undefined;
+
+    if (snapshot && typeof snapshot === "object") {
+      return snapshot as Record<string, any>;
+    }
+
+    const loaded = typeof runtime.loadConfig === "function" ? runtime.loadConfig() : undefined;
+    if (loaded && typeof loaded === "object") {
+      return loaded as Record<string, any>;
+    }
+  } catch {
+    // The plugin can still operate in unit tests where the OpenClaw runtime package is absent.
+  }
+
+  return {};
+}
+
+async function resolveEffectiveRootConfig(
+  cfg: Record<string, any> | undefined,
+  runtimeConfig?: Record<string, unknown>,
+): Promise<Record<string, any>> {
+  const resolved = resolveRuntimeRootConfig(cfg, runtimeConfig);
+
+  if (Object.keys(resolved).length > 0) {
+    return resolved;
+  }
+
+  return loadOpenClawRootConfig();
 }
 
 function isConfigured(cfg: Record<string, any>) {
@@ -640,6 +703,10 @@ const channelPlugin = {
     blurb: "Battle operations channel for OpenClaw, backed by the Clawdex control plane.",
     order: 90,
   },
+  capabilities: {
+    chatTypes: ["direct"],
+    nativeCommands: false,
+  },
   config: {
     listAccountIds: () => [],
     resolveAccount: (_cfg: Record<string, unknown>, accountId?: string | null) => ({
@@ -732,14 +799,17 @@ const plugin = {
   },
   register(api: PluginApi) {
     api.registerChannel?.({ plugin: channelPlugin });
+    const runtimeRootConfig = resolveRuntimeRootConfig(undefined, api.config);
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.status`, async ({ respond, cfg }) => {
-      const result = await channelPlugin.status.probe({ cfg });
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const result = await channelPlugin.status.probe({ cfg: effectiveCfg });
       respond(result.ok, result);
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.docs`, async ({ respond, cfg }) => {
-      const config = getConfig(cfg);
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const config = getConfig(effectiveCfg);
       respond(true, {
         ok: true,
         channel: CHANNEL_ID,
@@ -776,8 +846,9 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.agent.resolve`, async ({ respond, cfg, params }) => {
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
       const payload = params as AgentResolutionParams | undefined;
-      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+      const resolvedAgentId = resolveAgentIdByBindings(effectiveCfg, payload ?? {});
 
       respond(true, {
         ok: true,
@@ -788,7 +859,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.discovery`, async ({ respond, cfg, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
 
       try {
         const result = await callDiscovery(config, log);
@@ -799,7 +870,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.account.provision`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as Partial<AccountProvisionParams> | undefined;
 
       try {
@@ -828,7 +899,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.credit.balance`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as Partial<CreditBalanceParams> | undefined;
 
       if (!payload?.playerSlug && !payload?.email) {
@@ -844,7 +915,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.readiness`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const playerSlug = normalizeText(params?.playerSlug);
 
       if (!playerSlug) {
@@ -860,9 +931,10 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.create`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const config = getConfig(effectiveCfg);
       const payload = params as Partial<BattleCreateParams> | undefined;
-      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+      const resolvedAgentId = resolveAgentIdByBindings(effectiveCfg, payload ?? {});
 
       if (!payload?.challengerSlug || !payload?.defenderSlug) {
         return respond(false, { error: "challengerSlug and defenderSlug are required" });
@@ -881,9 +953,10 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.autoplay`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const config = getConfig(effectiveCfg);
       const payload = params as Partial<BattleAutoplayParams> | undefined;
-      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+      const resolvedAgentId = resolveAgentIdByBindings(effectiveCfg, payload ?? {});
 
       let challengerSlug = normalizeText(payload?.challengerSlug);
       let provisionResult: Record<string, unknown> | null = null;
@@ -963,10 +1036,11 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.accept`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const config = getConfig(effectiveCfg);
       const payload = params as Partial<BattleAcceptParams> | undefined;
       const challengeId = normalizeText(payload?.challengeId);
-      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+      const resolvedAgentId = resolveAgentIdByBindings(effectiveCfg, payload ?? {});
 
       if (!challengeId) {
         return respond(false, { error: "challengeId is required" });
@@ -981,10 +1055,11 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.battle.settle`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const config = getConfig(effectiveCfg);
       const payload = params as Partial<BattleSettleParams> | undefined;
       const challengeId = normalizeText(payload?.challengeId);
-      const resolvedAgentId = resolveAgentIdByBindings(cfg, payload ?? {});
+      const resolvedAgentId = resolveAgentIdByBindings(effectiveCfg, payload ?? {});
 
       if (!challengeId) {
         return respond(false, { error: "challengeId is required" });
@@ -1009,7 +1084,7 @@ const plugin = {
      * params: { limit?: number }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.topics.sync`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as { limit?: number } | undefined;
 
       try {
@@ -1024,7 +1099,7 @@ const plugin = {
      * debate.topics.list — 获取已有议题列表
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.topics.list`, async ({ respond, cfg, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
 
       try {
         const result = await callDebateTopicsList(config, log);
@@ -1039,7 +1114,8 @@ const plugin = {
      * params: { challengeId, topicId, sideAPlayerSlug, sideBPlayerSlug, totalRounds? }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.create`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const effectiveCfg = await resolveEffectiveRootConfig(cfg, runtimeRootConfig);
+      const config = getConfig(effectiveCfg);
       const payload = params as {
         challengeId?: string;
         topicId?: string;
@@ -1053,7 +1129,7 @@ const plugin = {
       }
 
       try {
-        const resolvedAgentId = await resolveAgentIdByBindings(config, { agentId: payload.sideAPlayerSlug } as any);
+        const resolvedAgentId = await resolveAgentIdByBindings(effectiveCfg, { agentId: payload.sideAPlayerSlug } as any);
         const result = await callDebateCreate(config, payload as any, log);
         return respond(true, { ...result, resolvedAgentId, channel: CHANNEL_ID });
       } catch (error) {
@@ -1066,7 +1142,7 @@ const plugin = {
      * params: { debateId }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.start`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as { debateId?: string } | undefined;
 
       if (!payload?.debateId) {
@@ -1086,7 +1162,7 @@ const plugin = {
      * params: { debateId, playerSlug, argument }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.argue`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as { debateId?: string; playerSlug?: string; argument?: string } | undefined;
 
       if (!payload?.debateId || !payload?.playerSlug || !payload?.argument) {
@@ -1106,7 +1182,7 @@ const plugin = {
      * params: { debateId, summary? }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.end`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as { debateId?: string; summary?: string } | undefined;
 
       if (!payload?.debateId) {
@@ -1126,7 +1202,7 @@ const plugin = {
      * params: { debateId }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.get`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as { debateId?: string } | undefined;
 
       if (!payload?.debateId) {
@@ -1145,7 +1221,7 @@ const plugin = {
      * debate.list — 获取所有辩论
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.list`, async ({ respond, cfg, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
 
       try {
         const result = await callDebateList(config, log);
@@ -1172,7 +1248,7 @@ const plugin = {
      * }
      */
     api.registerGatewayMethod?.(`${CHANNEL_ID}.debate.autoplay`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as {
         challengerSlug?: string;
         defenderSlug?: string;
@@ -1292,7 +1368,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.selftest.quick`, async ({ respond, cfg, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
 
       try {
         const [status, discovery] = await Promise.all([
@@ -1313,7 +1389,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod?.(`${CHANNEL_ID}.selftest.full`, async ({ respond, cfg, params, log }) => {
-      const config = getConfig(cfg);
+      const config = getConfig(await resolveEffectiveRootConfig(cfg, runtimeRootConfig));
       const payload = params as Partial<FullSelfTestParams> | undefined;
 
       try {
@@ -1329,4 +1405,4 @@ const plugin = {
 };
 
 export default plugin;
-export { channelPlugin, getConfig, isConfigured, resolveAgentIdByBindings };
+export { channelPlugin, getConfig, isConfigured, resolveAgentIdByBindings, resolveRuntimeRootConfig };
