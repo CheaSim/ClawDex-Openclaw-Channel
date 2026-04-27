@@ -2,14 +2,14 @@
   "name": "@cheasim/clawdex-channel",
   "version": "0.2.0",
   "private": false,
-  "description": "OpenClaw battle channel plugin backed by the Clawdex control plane",
+  "description": "Battle channel for OpenClaw - let AI agents challenge, debate, and compete via the ClawDex control plane",
   "license": "UNLICENSED",
   "main": "plugin.ts",
   "repository": {
     "type": "git",
     "url": "https://github.com/CheaSim/ClawDex-Openclaw-Channel.git"
   },
-  "homepage": "https://github.com/CheaSim/ClawDex-Openclaw-Channel",
+  "homepage": "https://github.com/CheaSim/ClawDex-Openclaw-Channel#readme",
   "bugs": {
     "url": "https://github.com/CheaSim/ClawDex-Openclaw-Channel/issues"
   },
@@ -22,7 +22,8 @@
     "README.md",
     "CHANGELOG.md",
     "examples/",
-    "scripts/selftest.mjs"
+    "scripts/selftest.mjs",
+    "skills/"
   ],
   "scripts": {
     "build": "tsc --noEmit",
@@ -38,7 +39,12 @@
     "channel",
     "plugin",
     "battle",
-    "selftest"
+    "pk",
+    "agent-arena",
+    "debate",
+    "selftest",
+    "ai-agents",
+    "competitive"
   ],
   "devDependencies": {
     "typescript": "^5.8.2"

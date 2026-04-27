@@ -32,6 +32,7 @@ type ClawdexChannelConfig = {
   defaultMode?: "public-arena" | "rivalry" | "ranked-1v1";
   readinessStrategy?: "control-plane" | "gateway";
   defaultAgentId?: string;
+  requestTimeoutMs?: number;
 };
 
 type BattleMode = "public-arena" | "rivalry" | "ranked-1v1";
@@ -149,6 +150,9 @@ const CHANNEL_ID = "clawdex-channel";
 const DEFAULT_STAKE = 20;
 const DEFAULT_SCHEDULE = "即刻开战";
 const DEFAULT_RULES_NOTE = "由 OpenClaw 插件自动发起的联调 PK。";
+const MAX_TEXT_LENGTH = 2000;
+const ALLOWED_MODES: BattleMode[] = ["public-arena", "rivalry", "ranked-1v1"];
+const ALLOWED_VISIBILITIES: ("public" | "followers")[] = ["public", "followers"];
 
 function isChannelLocalConfig(cfg: Record<string, any> | undefined): cfg is ClawdexChannelConfig {
   if (!cfg || typeof cfg !== "object") {
@@ -262,8 +266,32 @@ function resolveAgentIdByBindings(cfg: Record<string, any>, params: AgentResolut
   return config.defaultMode === "ranked-1v1" ? "clawdex-ranked" : "clawdex-main";
 }
 
-function normalizeText(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
+function normalizeText(value: unknown, maxLength = MAX_TEXT_LENGTH) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, maxLength);
+}
+
+function normalizeOptionalText(value: unknown, maxLength = MAX_TEXT_LENGTH): string | undefined {
+  const normalized = normalizeText(value, maxLength);
+  return normalized || undefined;
+}
+
+function validatePositiveNumber(value: unknown, field: string): { ok: boolean; value?: number; error?: string } {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  if (numeric === undefined || numeric <= 0) {
+    return { ok: false, error: `${field} must be a positive number` };
+  }
+  return { ok: true, value: numeric };
+}
+
+function isValidMode(mode: unknown): mode is BattleMode {
+  return typeof mode === "string" && ALLOWED_MODES.includes(mode as BattleMode);
+}
+
+function isValidVisibility(visibility: unknown): visibility is "public" | "followers" {
+  return visibility === "public" || visibility === "followers";
 }
 
 function requireConfig(config: ClawdexChannelConfig) {
@@ -309,19 +337,39 @@ async function callControlPlane(
   const url = buildControlPlaneUrl(safeConfig, path);
   log?.info?.(`[ClawdexPlugin] ${init.method ?? "GET"} ${url}`);
 
-  const response = await fetch(url, {
-    ...init,
-    headers: buildHeaders(safeConfig),
-  });
+  const timeoutMs = config.requestTimeoutMs ?? 15_000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  const payload = await readJsonSafely(response);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      headers: buildHeaders(safeConfig),
+      signal: controller.signal,
+    });
 
-  if (!response.ok) {
-    const message = typeof payload.message === "string" ? payload.message : `Control plane request failed with ${response.status}`;
-    throw new Error(message);
+    const payload = await readJsonSafely(response);
+
+    if (!response.ok) {
+      const status = response.status;
+      const message = typeof payload.message === "string"
+        ? payload.message
+        : `Control plane request failed with HTTP ${status}`;
+      const error: Error & { status?: number; payload?: Record<string, unknown> } = new Error(message);
+      error.status = status;
+      error.payload = payload;
+      throw error;
+    }
+
+    return payload;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Control plane request timed out after ${timeoutMs}ms: ${url}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  return payload;
 }
 
 async function callDiscovery(config: ClawdexChannelConfig, log?: GatewayMethodContext["log"]) {
@@ -922,14 +970,24 @@ const plugin = {
         return respond(false, { error: "challengerSlug and defenderSlug are required" });
       }
 
-      if (!payload.stake || payload.stake <= 0) {
-        return respond(false, { error: "stake must be greater than 0" });
+      const stakeValidation = validatePositiveNumber(payload?.stake, "stake");
+      if (!stakeValidation.ok) {
+        return respond(false, { error: stakeValidation.error });
+      }
+
+      if (payload.mode && !isValidMode(payload.mode)) {
+        return respond(false, { error: `Invalid mode. Allowed: ${ALLOWED_MODES.join(", ")}` });
+      }
+
+      if (payload.visibility && !isValidVisibility(payload.visibility)) {
+        return respond(false, { error: `Invalid visibility. Allowed: ${ALLOWED_VISIBILITIES.join(", ")}` });
       }
 
       try {
-        const result = await callBattleCreate(config, payload, log);
+        const result = await callBattleCreate(config, { ...payload, stake: stakeValidation.value }, log);
         return respond(true, { ...result, resolvedAgentId });
       } catch (error) {
+        log?.error?.(`[ClawdexPlugin] battle.create failed:`, error);
         return respond(false, { error: error instanceof Error ? error.message : "Failed to create battle" });
       }
     });
@@ -970,8 +1028,13 @@ const plugin = {
           });
         }
 
-        if (!payload.stake || payload.stake <= 0) {
-          return respond(false, { error: "stake must be greater than 0" });
+        const stakeValidation = validatePositiveNumber(payload.stake, "stake");
+        if (!stakeValidation.ok) {
+          return respond(false, { error: stakeValidation.error });
+        }
+
+        if (payload.mode && !isValidMode(payload.mode)) {
+          return respond(false, { error: `Invalid mode. Allowed: ${ALLOWED_MODES.join(", ")}` });
         }
 
         const [challengerReadiness, defenderReadiness] = await Promise.all([
@@ -981,7 +1044,7 @@ const plugin = {
 
         if (!challengerReadiness.ready || !defenderReadiness.ready) {
           return respond(false, {
-            error: "Players are not ready for auto PK yet",
+            error: "Players are not ready for auto PK yet. Ensure autoReady=true was set during provisioning.",
             challengerSlug,
             challengerReadiness,
             defenderReadiness,
@@ -995,7 +1058,7 @@ const plugin = {
             challengerSlug,
             defenderSlug: payload.defenderSlug,
             mode: payload.mode,
-            stake: payload.stake,
+            stake: stakeValidation.value,
             scheduledFor: payload.scheduledFor ?? DEFAULT_SCHEDULE,
             visibility: payload.visibility ?? "public",
             rulesNote: payload.rulesNote ?? "由 OpenClaw 自动发起 PK。",
@@ -1012,6 +1075,7 @@ const plugin = {
           provisionResult,
         });
       } catch (error) {
+        log?.error?.(`[ClawdexPlugin] battle.autoplay failed:`, error);
         return respond(false, { error: error instanceof Error ? error.message : "Failed to autoplay battle" });
       }
     });
@@ -1030,6 +1094,7 @@ const plugin = {
         const result = await callBattleAccept(config, payload ?? {}, log);
         return respond(true, { ...result, resolvedAgentId });
       } catch (error) {
+        log?.error?.(`[ClawdexPlugin] battle.accept failed:`, error);
         return respond(false, { error: error instanceof Error ? error.message : "Failed to accept battle" });
       }
     });
@@ -1052,6 +1117,7 @@ const plugin = {
         const result = await callBattleSettle(config, payload ?? {}, log);
         return respond(true, { ...result, resolvedAgentId });
       } catch (error) {
+        log?.error?.(`[ClawdexPlugin] battle.settle failed:`, error);
         return respond(false, { error: error instanceof Error ? error.message : "Failed to sync settlement" });
       }
     });
