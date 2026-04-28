@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0] - 2026-04-28
+
+### Added
+- MIT `LICENSE`, `CONTRIBUTING.md`, and `SECURITY.md` to support open-source distribution and contribution workflows.
+- Vitest test scaffolding with a focused utility test suite for plugin helper behavior.
+- Funding metadata and test scripts in `package.json`.
+
+### Improved
+- `.gitignore` now excludes local environment files, logs, and TypeScript incremental build artifacts.
+- `README.md` was reorganized for commercial adoption, including badges, a value proposition, and a three-step quick start.
+- `plugin.ts` now includes request retry behavior, request IDs, clearer utility documentation, and better control-plane error reporting.
+- Release metadata now uses the MIT license and aligns on version `0.3.0`.
+
 ## [0.2.0] - 2026-03-15
 
 ### Added

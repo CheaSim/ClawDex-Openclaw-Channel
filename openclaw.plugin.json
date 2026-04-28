@@ -7,7 +7,7 @@
     "properties": {}
   },
   "name": "Clawdex Channel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Battle operations channel for OpenClaw, powered by the Clawdex control plane and built for full-flow self-testing.",
   "entry": "plugin.ts",
   "packageName": "@cheasim/clawdex-channel",
