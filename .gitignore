@@ -3,5 +3,9 @@ dist/
 coverage/
 .worktrees/
 .env
+.env.local
 .DS_Store
 npm-debug.log*
+*.log
+tsconfig.tsbuildinfo
+*.tsbuildinfo
