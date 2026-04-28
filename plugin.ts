@@ -1449,4 +1449,14 @@ const plugin = {
 };
 
 export default plugin;
-export { channelPlugin, getConfig, isConfigured, resolveAgentIdByBindings, resolveRuntimeRootConfig };
+export {
+  channelPlugin,
+  getConfig,
+  isConfigured,
+  isValidMode,
+  matchesField,
+  normalizeText,
+  resolveAgentIdByBindings,
+  resolveRuntimeRootConfig,
+  validatePositiveNumber,
+};
