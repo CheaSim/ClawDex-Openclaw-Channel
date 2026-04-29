@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  default as plugin,
+  callDebateTopicsSync,
   callControlPlane,
   getConfig,
   isValidMode,
@@ -11,6 +13,27 @@ import {
   resolveRuntimeRootConfig,
   validatePositiveNumber,
 } from "../plugin";
+
+function registerGatewayMethods() {
+  const handlers = new Map<string, (context: any) => Promise<void> | void>();
+
+  plugin.register({
+    registerChannel: vi.fn(),
+    registerGatewayMethod: (name: string, handler: (context: any) => Promise<void> | void) => {
+      handlers.set(name, handler);
+    },
+  } as any);
+
+  return handlers;
+}
+
+const testRootConfig = {
+  channels: {
+    "clawdex-channel": {
+      controlPlaneBaseUrl: "https://control-plane.example/api",
+    },
+  },
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -268,5 +291,131 @@ describe("callControlPlane", () => {
     expect(caughtError).toBeDefined();
     expect(caughtError!.message).toMatch(/\[requestId: .+\]/);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("callDebateTopicsSync", () => {
+  it("defaults invalid limits to 10 before sending the control-plane request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true, topics: [] }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callDebateTopicsSync(
+      {
+        controlPlaneBaseUrl: "https://control-plane.example/api",
+      },
+      0,
+    );
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(request?.body).toBe(JSON.stringify({ limit: 10 }));
+  });
+});
+
+describe("debate gateway methods", () => {
+  it("debate.topics.sync rejects invalid limits before calling the helper", async () => {
+    const handlers = registerGatewayMethods();
+    const respond = vi.fn();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handlers.get("clawdex-channel.debate.topics.sync")?.({
+      cfg: testRootConfig,
+      params: { limit: 0 },
+      respond,
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(false, { error: "limit must be a positive number" });
+  });
+
+  it("debate.create does not report a resolvedAgentId from the side A player slug", async () => {
+    const handlers = registerGatewayMethods();
+    const respond = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true, debate: { id: "debate-1" } }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handlers.get("clawdex-channel.debate.create")?.({
+      cfg: testRootConfig,
+      params: {
+        challengeId: "challenge-1",
+        topicId: "topic-1",
+        sideAPlayerSlug: "player-a",
+        sideBPlayerSlug: "player-b",
+      },
+      respond,
+    });
+
+    expect(respond).toHaveBeenCalledWith(true, {
+      ok: true,
+      debate: { id: "debate-1" },
+      channel: "clawdex-channel",
+    });
+  });
+
+  it("debate.autoplay rejects invalid stakes before creating the challenge", async () => {
+    const handlers = registerGatewayMethods();
+    const respond = vi.fn();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handlers.get("clawdex-channel.debate.autoplay")?.({
+      cfg: testRootConfig,
+      params: {
+        challengerSlug: "player-a",
+        defenderSlug: "player-b",
+        topicId: "topic-1",
+        stake: 0,
+        arguments: { a: ["a1"], b: ["b1"] },
+      },
+      respond,
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(false, { error: "stake must be a positive number" });
+  });
+
+  it("debate.autoplay defaults scheduledFor to immediate", async () => {
+    const handlers = registerGatewayMethods();
+    const respond = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, challenge: { id: "challenge-1" } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, debate: { id: "debate-1" } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handlers.get("clawdex-channel.debate.autoplay")?.({
+      cfg: testRootConfig,
+      params: {
+        challengerSlug: "player-a",
+        defenderSlug: "player-b",
+        topicId: "topic-1",
+        arguments: { a: ["a1"], b: ["b1"] },
+      },
+      respond,
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(request?.body).toContain('"scheduledFor":"immediate"');
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        ok: true,
+        challengeId: "challenge-1",
+        debateId: "debate-1",
+        channel: "clawdex-channel",
+      }),
+    );
   });
 });

@@ -563,10 +563,11 @@ async function callDebateTopicsSync(
   limit: number,
   log?: GatewayMethodContext["log"],
 ) {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 10;
   return callControlPlane(
     config,
     "/openclaw/plugin/debates/topics",
-    { method: "POST", body: JSON.stringify({ limit }) },
+    { method: "POST", body: JSON.stringify({ limit: safeLimit }) },
     log,
   );
 }
@@ -1200,8 +1201,13 @@ const plugin = {
       const config = getEffectiveConfig(cfg, rootCfg);
       const payload = params as { limit?: number } | undefined;
 
+      const limitValidation = validatePositiveNumber(payload?.limit ?? 10, "limit");
+      if (!limitValidation.ok) {
+        return respond(false, { error: limitValidation.error });
+      }
+
       try {
-        const result = await callDebateTopicsSync(config, payload?.limit ?? 10, log);
+        const result = await callDebateTopicsSync(config, limitValidation.value, log);
         return respond(true, { ...result, channel: CHANNEL_ID });
       } catch (error) {
         return respond(false, { error: error instanceof Error ? error.message : "Failed to sync topics" });
@@ -1241,9 +1247,8 @@ const plugin = {
       }
 
       try {
-        const resolvedAgentId = await resolveAgentIdByBindings(resolveRuntimeRootConfig(cfg, rootCfg), { agentId: payload.sideAPlayerSlug } as any);
         const result = await callDebateCreate(config, payload as any, log);
-        return respond(true, { ...result, resolvedAgentId, channel: CHANNEL_ID });
+        return respond(true, { ...result, channel: CHANNEL_ID });
       } catch (error) {
         return respond(false, { error: error instanceof Error ? error.message : "Failed to create debate" });
       }
@@ -1400,13 +1405,19 @@ const plugin = {
           }
         }
 
+        // Step 1.5: Validate stake
+        const stakeValidation = validatePositiveNumber(payload.stake ?? 30, "stake");
+        if (!stakeValidation.ok) {
+          return respond(false, { error: stakeValidation.error });
+        }
+
         // Step 2: 创建 Challenge
         log?.info?.("[DebateAutoplay] Creating challenge...");
         const battleResult = await callBattleCreate(config, {
           challengerSlug: payload.challengerSlug,
           defenderSlug: payload.defenderSlug,
-          stake: payload.stake ?? 30,
-          scheduledFor: payload.scheduledFor ?? "辩论赛",
+          stake: stakeValidation.value,
+          scheduledFor: payload.scheduledFor ?? DEFAULT_SCHEDULE,
           mode: payload.mode ?? "public-arena",
           rulesNote: `Polymarket 议题辩论 PK，共 ${totalRounds} 轮`,
         }, log);
@@ -1519,6 +1530,7 @@ const plugin = {
 export default plugin;
 export {
   callControlPlane,
+  callDebateTopicsSync,
   channelPlugin,
   getConfig,
   isConfigured,
