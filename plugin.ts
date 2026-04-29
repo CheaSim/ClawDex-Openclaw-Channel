@@ -148,8 +148,8 @@ type AgentResolutionParams = {
 
 const CHANNEL_ID = "clawdex-channel";
 const DEFAULT_STAKE = 20;
-const DEFAULT_SCHEDULE = "即刻开战";
-const DEFAULT_RULES_NOTE = "由 OpenClaw 插件自动发起的联调 PK。";
+const DEFAULT_SCHEDULE = "immediate";
+const DEFAULT_RULES_NOTE = "Created automatically by the OpenClaw plugin for integration testing.";
 const MAX_TEXT_LENGTH = 2000;
 const ALLOWED_MODES: BattleMode[] = ["public-arena", "rivalry", "ranked-1v1"];
 const ALLOWED_VISIBILITIES: ("public" | "followers")[] = ["public", "followers"];
@@ -166,6 +166,9 @@ function isChannelLocalConfig(cfg: Record<string, any> | undefined): cfg is Claw
     || "defaultAgentId" in cfg;
 }
 
+/**
+ * Normalizes runtime config into the root OpenClaw config shape expected by this plugin.
+ */
 function resolveRuntimeRootConfig(
   cfg: Record<string, any> | undefined,
   rootCfg?: Record<string, any>,
@@ -189,6 +192,9 @@ function resolveRuntimeRootConfig(
   return {};
 }
 
+/**
+ * Extracts the Clawdex channel config from either root config or direct channel-local config.
+ */
 function getConfig(cfg: Record<string, any>): ClawdexChannelConfig {
   if (isChannelLocalConfig(cfg)) {
     return cfg;
@@ -204,6 +210,9 @@ function getEffectiveConfig(
   return getConfig(resolveRuntimeRootConfig(cfg, rootCfg));
 }
 
+/**
+ * Returns whether the minimum control-plane configuration is present.
+ */
 function isConfigured(cfg: Record<string, any>) {
   const config = getConfig(cfg);
   return Boolean(config.controlPlaneBaseUrl);
@@ -213,6 +222,9 @@ function getBindings(cfg: Record<string, any>) {
   return (Array.isArray(cfg?.bindings) ? cfg.bindings : []) as Binding[];
 }
 
+/**
+ * Matches a binding field against a concrete runtime value, supporting missing and wildcard expectations.
+ */
 function matchesField(expected: string | undefined, actual: string | undefined) {
   if (!expected || expected === "*") {
     return true;
@@ -221,6 +233,9 @@ function matchesField(expected: string | undefined, actual: string | undefined) 
   return expected === actual;
 }
 
+/**
+ * Resolves the target agent id from explicit params, bindings, or the channel default agent id.
+ */
 function resolveAgentIdByBindings(cfg: Record<string, any>, params: AgentResolutionParams) {
   if (params.agentId) {
     return params.agentId;
@@ -266,6 +281,9 @@ function resolveAgentIdByBindings(cfg: Record<string, any>, params: AgentResolut
   return config.defaultMode === "ranked-1v1" ? "clawdex-ranked" : "clawdex-main";
 }
 
+/**
+ * Trims unknown input into a bounded string, returning an empty string for non-string values.
+ */
 function normalizeText(value: unknown, maxLength = MAX_TEXT_LENGTH) {
   if (typeof value !== "string") {
     return "";
@@ -278,6 +296,9 @@ function normalizeOptionalText(value: unknown, maxLength = MAX_TEXT_LENGTH): str
   return normalized || undefined;
 }
 
+/**
+ * Validates a finite positive number and returns a tagged success or error payload.
+ */
 function validatePositiveNumber(value: unknown, field: string): { ok: boolean; value?: number; error?: string } {
   const numeric = typeof value === "number" && Number.isFinite(value) ? value : undefined;
   if (numeric === undefined || numeric <= 0) {
@@ -286,6 +307,9 @@ function validatePositiveNumber(value: unknown, field: string): { ok: boolean; v
   return { ok: true, value: numeric };
 }
 
+/**
+ * Checks whether a value is one of the supported battle modes.
+ */
 function isValidMode(mode: unknown): mode is BattleMode {
   return typeof mode === "string" && ALLOWED_MODES.includes(mode as BattleMode);
 }
@@ -327,6 +351,11 @@ async function readJsonSafely(response: Response) {
   }
 }
 
+/**
+ * Core HTTP client for ClawDex control-plane calls.
+ * Supports exponential-backoff retry (max 3 retries) for 5xx and network errors,
+ * and attaches a persistent X-Request-Id header for debugging.
+ */
 async function callControlPlane(
   config: ClawdexChannelConfig,
   path: string,
@@ -335,41 +364,80 @@ async function callControlPlane(
 ) {
   const safeConfig = requireConfig(config);
   const url = buildControlPlaneUrl(safeConfig, path);
-  log?.info?.(`[ClawdexPlugin] ${init.method ?? "GET"} ${url}`);
+  const requestId = typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  log?.info?.(`[ClawdexPlugin] ${init.method ?? "GET"} ${url} [requestId: ${requestId}]`);
 
   const timeoutMs = config.requestTimeoutMs ?? 15_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const maxRetries = 3;
+  const backoffs = [1000, 2000, 4000];
 
-  try {
-    const response = await fetch(url, {
-      ...init,
-      headers: buildHeaders(safeConfig),
-      signal: controller.signal,
-    });
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    const payload = await readJsonSafely(response);
+    try {
+      const headers = buildHeaders(safeConfig);
+      headers.set("X-Request-Id", requestId);
 
-    if (!response.ok) {
-      const status = response.status;
-      const message = typeof payload.message === "string"
-        ? payload.message
-        : `Control plane request failed with HTTP ${status}`;
-      const error: Error & { status?: number; payload?: Record<string, unknown> } = new Error(message);
-      error.status = status;
-      error.payload = payload;
+      const response = await fetch(url, {
+        ...init,
+        headers,
+        signal: controller.signal,
+      });
+
+      const payload = await readJsonSafely(response);
+
+      if (!response.ok) {
+        const status = response.status;
+        const message = typeof payload.message === "string"
+          ? payload.message
+          : `Control plane request failed with HTTP ${status}`;
+        const error: Error & { status?: number; payload?: Record<string, unknown> } = new Error(
+          `[requestId: ${requestId}] ${message}`,
+        );
+        error.status = status;
+        error.payload = payload;
+
+        if (status >= 500 && attempt < maxRetries) {
+          log?.warn?.(`[ClawdexPlugin] retrying after ${status} (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise((r) => setTimeout(r, backoffs[attempt]));
+          continue;
+        }
+        throw error;
+      }
+
+      return payload;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        if (attempt < maxRetries) {
+          log?.warn?.(`[ClawdexPlugin] timeout, retrying (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise((r) => setTimeout(r, backoffs[attempt]));
+          continue;
+        }
+        throw new Error(`[requestId: ${requestId}] Control plane request timed out after ${timeoutMs}ms: ${url}`);
+      }
+      // Network errors — retry
+      if (attempt < maxRetries) {
+        log?.warn?.(`[ClawdexPlugin] network error, retrying (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise((r) => setTimeout(r, backoffs[attempt]));
+        continue;
+      }
+      if (error instanceof Error) {
+        if (!error.message.includes(`[requestId: ${requestId}]`)) {
+          error.message = `[requestId: ${requestId}] ${error.message}`;
+        }
+        throw error;
+      }
       throw error;
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    return payload;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`Control plane request timed out after ${timeoutMs}ms: ${url}`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
   }
+
+  // Should never reach here, but TypeScript wants a return
+  throw new Error(`[requestId: ${requestId}] Exhausted all retries for ${url}`);
 }
 
 async function callDiscovery(config: ClawdexChannelConfig, log?: GatewayMethodContext["log"]) {
@@ -1450,6 +1518,7 @@ const plugin = {
 
 export default plugin;
 export {
+  callControlPlane,
   channelPlugin,
   getConfig,
   isConfigured,
